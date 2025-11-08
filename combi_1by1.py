@@ -1,0 +1,512 @@
+"""
+Robot Vision System - Combined Streamlit App
+Integrates Safety Monitoring (YOLOv8n) and Depth Estimation (MiDaS)
+"""
+
+import streamlit as st
+import cv2
+import numpy as np
+import torch
+from ultralytics import YOLO
+from collections import deque
+import time
+
+# Page configuration
+st.set_page_config(
+    page_title="Robot Vision System",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for safety indicators
+st.markdown("""
+<style>
+    .safety-indicator {
+        padding: 30px;
+        border-radius: 15px;
+        text-align: center;
+        font-size: 36px;
+        font-weight: bold;
+        margin: 20px 0;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .safe {
+        background-color: #4CAF50;
+        color: white;
+    }
+    .unsafe {
+        background-color: #f44336;
+        color: white;
+        animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
+    }
+    .stats-box {
+        background-color: #B8BABE;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================================
+# MODEL LOADING
+# ============================================================================
+
+@st.cache_resource
+def load_yolo_model():
+    """Load YOLOv8n model (cached for performance)"""
+    try:
+        model = YOLO('yolov8n.pt')
+        return model
+    except Exception as e:
+        st.error(f"Failed to load YOLO model: {e}")
+        st.info("The model will be downloaded automatically on first run.")
+        return None
+
+
+@st.cache_resource
+def load_midas_model():
+    """Load MiDaS depth estimation model"""
+    try:
+        model_type = "MiDaS_small"
+        midas = torch.hub.load("intel-isl/MiDaS", model_type)
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        midas.to(device).eval()
+
+        transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+        transform = transforms.small_transform if model_type == "MiDaS_small" else transforms.dpt_transform
+
+        return midas, transform, device
+    except Exception as e:
+        st.error(f"Failed to load MiDaS model: {e}")
+        return None, None, None
+
+
+# ============================================================================
+# SAFETY MONITOR CLASSES
+# ============================================================================
+
+def calculate_bbox_area_percentage(bbox, frame_shape):
+    """
+    Calculate bounding box area as percentage of frame area
+
+    Args:
+        bbox: YOLO bounding box [x1, y1, x2, y2]
+        frame_shape: tuple (height, width)
+
+    Returns:
+        float: percentage of frame area occupied by bbox
+    """
+    x1, y1, x2, y2 = bbox
+    bbox_area = (x2 - x1) * (y2 - y1)
+    frame_area = frame_shape[0] * frame_shape[1]
+    return (bbox_area / frame_area) * 100
+
+
+class SafetyMonitor:
+    """
+    Manages safety state with debounce logic
+    """
+    def __init__(self, debounce_frames=3, area_threshold=15.0):
+        self.debounce_frames = debounce_frames
+        self.area_threshold = area_threshold
+        self.state_history = deque(maxlen=debounce_frames)
+        self.current_state = "SAFE"
+
+    def update(self, is_unsafe):
+        """
+        Update safety state with debounce
+
+        Args:
+            is_unsafe: bool indicating if current frame shows unsafe condition
+        """
+        self.state_history.append(is_unsafe)
+
+        # Only change state if all recent frames agree
+        if len(self.state_history) == self.debounce_frames:
+            if all(self.state_history):
+                self.current_state = "UNSAFE"
+            elif not any(self.state_history):
+                self.current_state = "SAFE"
+
+    def get_state(self):
+        """Return current safety state"""
+        return self.current_state
+
+
+# ============================================================================
+# PROCESSING FUNCTIONS
+# ============================================================================
+
+def process_safety_frame(frame, model, safety_monitor, area_threshold):
+    """
+    Process a single frame: detect humans and determine safety
+
+    Args:
+        frame: numpy array of the video frame
+        model: YOLOv8 model
+        safety_monitor: SafetyMonitor instance
+        area_threshold: float percentage threshold for unsafe condition
+
+    Returns:
+        annotated_frame: frame with bounding boxes
+        max_area_percentage: largest human bbox area percentage
+        num_persons: number of persons detected
+    """
+    # Run YOLO inference
+    results = model(frame, verbose=False)
+
+    annotated_frame = frame.copy()
+    max_area_percentage = 0.0
+    num_persons = 0
+
+    # Filter for 'person' class (class 0 in COCO dataset)
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            cls = int(box.cls[0])
+            conf = float(box.conf[0])
+
+            # Only process 'person' detections with confidence > 0.5
+            if cls == 0 and conf > 0.5:
+                num_persons += 1
+
+                # Get bounding box coordinates
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+
+                # Calculate area percentage
+                area_pct = calculate_bbox_area_percentage(
+                    [x1, y1, x2, y2],
+                    frame.shape
+                )
+                max_area_percentage = max(max_area_percentage, area_pct)
+
+                # Draw bounding box
+                color = (0, 0, 255) if area_pct > area_threshold else (0, 255, 0)
+                cv2.rectangle(
+                    annotated_frame,
+                    (int(x1), int(y1)),
+                    (int(x2), int(y2)),
+                    color,
+                    2
+                )
+
+                # Add label
+                label = f"Person {conf:.2f} | {area_pct:.1f}%"
+                cv2.putText(
+                    annotated_frame,
+                    label,
+                    (int(x1), int(y1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2
+                )
+
+    # Update safety monitor
+    is_unsafe = max_area_percentage > area_threshold
+    safety_monitor.update(is_unsafe)
+
+    return annotated_frame, max_area_percentage, num_persons
+
+
+def process_depth_frame(frame, midas, transform, device):
+    """
+    Process frame for depth estimation
+
+    Args:
+        frame: numpy array of the video frame (BGR)
+        midas: MiDaS model
+        transform: MiDaS transform
+        device: torch device
+
+    Returns:
+        combined: RGB frame and depth map side by side
+    """
+    # Convert BGR to RGB
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # Apply MiDaS transforms
+    input_batch = transform(frame_rgb).to(device)
+
+    # Predict depth
+    with torch.no_grad():
+        prediction = midas(input_batch)
+        prediction = torch.nn.functional.interpolate(
+            prediction.unsqueeze(1),
+            size=frame_rgb.shape[:2],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
+
+    # Convert to numpy and normalize
+    depth_map = prediction.cpu().numpy()
+    depth_map = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
+    depth_map = np.uint8(depth_map)
+    depth_color = cv2.applyColorMap(depth_map, cv2.COLORMAP_MAGMA)
+    depth_color = cv2.cvtColor(depth_color, cv2.COLOR_BGR2RGB)
+
+    # Combine RGB + Depth side by side
+    combined = np.hstack((frame_rgb, depth_color))
+    return combined
+
+
+# ============================================================================
+# TAB 1: SAFETY MONITOR
+# ============================================================================
+
+def safety_monitor_tab():
+    """Safety monitoring interface"""
+    
+    st.markdown("### 🤖 Robot Safety-Bot")
+    st.markdown("**Real-time human detection with YOLOv8n**")
+    st.markdown("---")
+
+    # Sidebar controls
+    st.sidebar.header("⚙️ Safety Settings")
+
+    area_threshold = st.sidebar.slider(
+        "Safety Threshold (%)",
+        min_value=5.0,
+        max_value=50.0,
+        value=15.0,
+        step=1.0,
+        help="Bounding box area percentage that triggers UNSAFE state"
+    )
+
+    debounce_frames = st.sidebar.slider(
+        "Debounce Frames",
+        min_value=1,
+        max_value=10,
+        value=3,
+        help="Number of consecutive frames needed to change safety state"
+    )
+
+    show_fps = st.sidebar.checkbox("Show FPS", value=True)
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📊 How it works")
+    st.sidebar.info(
+        "🟢 **SAFE**: No humans detected or small bounding box\n\n"
+        "🔴 **UNSAFE**: Human bounding box area exceeds threshold"
+    )
+
+    # Load YOLO model
+    model = load_yolo_model()
+    if model is None:
+        st.error("Failed to load YOLO model. Please check your installation.")
+        return
+
+    # Initialize safety monitor
+    if 'safety_monitor' not in st.session_state:
+        st.session_state.safety_monitor = SafetyMonitor(
+            debounce_frames=debounce_frames,
+            area_threshold=area_threshold
+        )
+    else:
+        # Update parameters if changed
+        st.session_state.safety_monitor.debounce_frames = debounce_frames
+        st.session_state.safety_monitor.area_threshold = area_threshold
+
+    # Create layout
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("📹 Live Video Feed")
+        video_placeholder = st.empty()
+
+    with col2:
+        st.subheader("🚦 Safety Status")
+        status_placeholder = st.empty()
+        stats_placeholder = st.empty()
+
+    # Control buttons
+    start_button = st.button("🎥 Start Camera", type="primary", key="safety_start")
+    stop_button = st.button("⏹️ Stop Camera", key="safety_stop")
+
+    # Initialize session state for camera control
+    if 'safety_camera_running' not in st.session_state:
+        st.session_state.safety_camera_running = False
+
+    if start_button:
+        st.session_state.safety_camera_running = True
+
+    if stop_button:
+        st.session_state.safety_camera_running = False
+
+    # Main camera loop
+    if st.session_state.safety_camera_running:
+        cap = cv2.VideoCapture(0)
+
+        if not cap.isOpened():
+            st.error("❌ Cannot access webcam. Please check your camera permissions.")
+            return
+
+        # FPS calculation
+        fps_history = deque(maxlen=30)
+
+        try:
+            while st.session_state.safety_camera_running:
+                start_time = time.time()
+
+                ret, frame = cap.read()
+                if not ret:
+                    st.error("Failed to read from webcam")
+                    break
+
+                # Process frame
+                annotated_frame, max_area, num_persons = process_safety_frame(
+                    frame,
+                    model,
+                    st.session_state.safety_monitor,
+                    area_threshold
+                )
+
+                # Calculate FPS
+                fps = 1.0 / (time.time() - start_time)
+                fps_history.append(fps)
+                avg_fps = np.mean(fps_history)
+
+                # Add FPS to frame if enabled
+                if show_fps:
+                    cv2.putText(
+                        annotated_frame,
+                        f"FPS: {avg_fps:.1f}",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 255, 255),
+                        2
+                    )
+
+                # Convert BGR to RGB for Streamlit
+                annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+
+                # Display video
+                video_placeholder.image(annotated_frame_rgb, channels="RGB", use_container_width=True)
+
+                # Display safety status
+                safety_state = st.session_state.safety_monitor.get_state()
+
+                if safety_state == "SAFE":
+                    status_placeholder.markdown(
+                        '<div class="safety-indicator safe">🟢 SAFE</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    status_placeholder.markdown(
+                        '<div class="safety-indicator unsafe">🔴 STOP</div>',
+                        unsafe_allow_html=True
+                    )
+
+                # Display statistics
+                stats_placeholder.markdown(f"""
+                <div class="stats-box">
+                    <strong>📊 Detection Stats</strong><br>
+                    Persons Detected: <strong>{num_persons}</strong><br>
+                    Max Bbox Area: <strong>{max_area:.2f}%</strong><br>
+                    Threshold: <strong>{area_threshold:.1f}%</strong><br>
+                    FPS: <strong>{avg_fps:.1f}</strong>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Small delay to prevent overwhelming the browser
+                time.sleep(0.01)
+
+        finally:
+            cap.release()
+
+    else:
+        st.info("👆 Click 'Start Camera' to begin monitoring")
+
+
+# ============================================================================
+# TAB 2: DEPTH ESTIMATION
+# ============================================================================
+
+def depth_estimation_tab():
+    """Depth estimation interface"""
+    
+    st.markdown("### 📷 Monocular Depth Estimation")
+    st.markdown("**Real-time depth perception from a single camera using MiDaS**")
+    st.markdown("Move your webcam to see depth perception. Brighter = closer, darker = farther.")
+    st.markdown("---")
+
+    # Load MiDaS model
+    midas, transform, device = load_midas_model()
+    if midas is None:
+        st.error("Failed to load MiDaS model. Please check your installation.")
+        return
+
+    # Sidebar info
+    st.sidebar.header("⚙️ Depth Settings")
+    st.sidebar.info(
+        "🎨 **Color Mapping**\n\n"
+        "- **Magma colormap**: Bright yellow/white = close objects\n"
+        "- **Dark purple/black**: Far objects\n\n"
+        "💡 **Tip**: The left side shows the original RGB image, "
+        "the right side shows the estimated depth map."
+    )
+
+    # Control toggle
+    run_button = st.toggle("▶️ Start Camera", value=False, key="depth_toggle")
+    frame_window = st.empty()
+
+    if run_button:
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        if not cap.isOpened():
+            st.error("❌ Cannot access webcam. Please check your camera permissions.")
+            return
+
+        try:
+            while run_button:
+                ret, frame = cap.read()
+                if not ret:
+                    st.error("Failed to read from webcam")
+                    break
+
+                # Process frame for depth estimation
+                combined = process_depth_frame(frame, midas, transform, device)
+
+                # Display combined image
+                frame_window.image(combined, channels="RGB", use_container_width=True)
+
+        finally:
+            cap.release()
+
+    else:
+        st.info("▶️ Click the toggle to start the webcam.")
+
+
+# ============================================================================
+# MAIN APPLICATION
+# ============================================================================
+
+def main():
+    """Main application with tabs"""
+    
+    # Title
+    st.title("🤖 Robot Vision System")
+    st.markdown("**Integrated Safety Monitoring and Depth Estimation**")
+    
+    # Create tabs
+    tab1, tab2 = st.tabs(["🚦 Safety Monitor", "📏 Depth Estimation"])
+    
+    with tab1:
+        safety_monitor_tab()
+    
+    with tab2:
+        depth_estimation_tab()
+
+
+if __name__ == "__main__":
+    main()
