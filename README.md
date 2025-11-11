@@ -12,11 +12,12 @@ A comprehensive collection of real-time object detection applications powered by
 
 ## 🎯 Overview
 
-This repository contains four production-ready object detection applications built with state-of-the-art YOLOv8 models:
+This repository contains five production-ready object detection applications built with state-of-the-art YOLOv8 models:
 
 | Application | Description | Type | Key Features |
 |------------|-------------|------|--------------|
 | 🤖 **Robot Safety-Bot** | Real-time human proximity detection | Streamlit Web App | Safety zones, debounce logic, proximity alerts |
+| 📊 **Tracking Analytics** | Object tracking with dwell time analytics | Streamlit Web App | ByteTrack, zone analytics, heatmaps, queue detection |
 | 🏠 **Household Scanner** | Live household item detection | Streamlit Web App | 15+ item categories, real-time counting |
 | 📦 **Item Detector** | Batch household item detection | Video Processing | Video annotation, frame-by-frame analysis |
 | 🚗 **Vehicle Tracker** | Multi-vehicle detection & counting | Video Processing | Cars, trucks, buses, motorcycles |
@@ -38,6 +39,20 @@ The flagship application - a safety monitoring system designed for robotic envir
 - **Production-Ready**: Designed for integration with robotic control systems
 
 **Perfect for:** Collaborative robots, warehouse automation, safety-critical applications
+
+### 📊 Tracking Analytics (`tracking_analytics.py`)
+Advanced object tracking with comprehensive analytics:
+
+- **Persistent Object Tracking**: ByteTrack algorithm maintains consistent IDs
+- **Zone-Based Analytics**: Define custom ROIs (entrance, queue, browsing areas)
+- **Dwell Time Tracking**: Calculate time spent per zone for each object
+- **Path Trajectories**: Visualize movement paths with heatmaps
+- **Queue Detection**: Real-time queue length monitoring
+- **Abandoned Object Alerts**: Detect stationary items for extended periods
+- **Data Export**: Export tracking data to JSON/CSV for analysis
+- **Real-Time Dashboard**: Live statistics, zone analytics, and alerts
+
+**Perfect for:** Retail analytics, security surveillance, queue management, event analytics, workspace optimization
 
 ### 🏠 Household Scanner (`Streaming.py`)
 Real-time object recognition for everyday items:
@@ -160,7 +175,34 @@ streamlit run human.py
 - `Debounce Frames`: Number of consecutive frames required for state change (default: 3)
 - `Show FPS`: Toggle FPS counter display
 
-### 2️⃣ Household Scanner (Streamlit Web App)
+### 2️⃣ Tracking Analytics (Streamlit Web App)
+
+Launch the comprehensive tracking analytics system:
+
+```bash
+streamlit run tracking_analytics.py
+```
+
+**Controls:**
+- Select **Track Objects** (person, car, truck, bus, bicycle, motorcycle)
+- Adjust **Confidence Threshold** (0.1-0.9) for detection sensitivity
+- Toggle **Show Trajectories** to visualize movement paths
+- Toggle **Show Heatmap** for popular area visualization
+- Toggle **Show Zones** to display ROI boundaries
+- Set **Abandoned Object Alert** threshold (10-120 seconds)
+- Click **Export Data** to save tracking statistics
+
+**Key Features:**
+- Real-time object tracking with persistent IDs
+- Zone-based occupancy and dwell time analytics
+- Movement heatmaps showing popular areas
+- Queue length monitoring in designated zones
+- Abandoned object detection with alerts
+- CSV/JSON export for further analysis
+
+**See detailed documentation:** [tracking_analytics.md](tracking_analytics.md)
+
+### 3️⃣ Household Scanner (Streamlit Web App)
 
 Real-time household item detection:
 
