@@ -1,2 +1,12 @@
 venv
 *.mp4
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# Tracking analytics exports
+tracking_data_*.json
+tracking_data_*.csv
